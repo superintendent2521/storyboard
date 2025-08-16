@@ -92,18 +92,40 @@ function addImageToCanvas(src) {
         imgElement.style.left = `${x}px`;
         imgElement.style.top = `${y}px`;
         
+        // Add delete button
+        const deleteBtn = document.createElement('button');
+        deleteBtn.className = 'delete-btn';
+        deleteBtn.innerHTML = '×';
+        deleteBtn.style.position = 'absolute';
+        deleteBtn.style.right = '5px';
+        deleteBtn.style.top = '5px';
+        deleteBtn.style.zIndex = '1000';
+        deleteBtn.dataset.imageId = Date.now() + Math.random();
+        
+        // Create container for image and delete button
+        const imageContainer = document.createElement('div');
+        imageContainer.className = 'image-container';
+        imageContainer.style.position = 'absolute';
+        imageContainer.style.left = `${x}px`;
+        imageContainer.style.top = `${y}px`;
+        
         // Add drag functionality
         imgElement.addEventListener('mousedown', startElementDrag);
         imgElement.addEventListener('touchstart', handleElementTouchStart);
         
-        canvas.appendChild(imgElement);
+        // Add delete functionality
+        deleteBtn.addEventListener('click', deleteImage);
+        
+        imageContainer.appendChild(imgElement);
+        imageContainer.appendChild(deleteBtn);
+        canvas.appendChild(imageContainer);
         
         // Store image data
         const imageData = {
             src: src,
             x: x,
             y: y,
-            id: Date.now() + Math.random()
+            id: deleteBtn.dataset.imageId
         };
         
         images.push(imageData);
@@ -111,13 +133,31 @@ function addImageToCanvas(src) {
     };
 }
 
+// Delete image function
+function deleteImage(e) {
+    e.stopPropagation();
+    const imageId = e.target.dataset.imageId;
+    const imageContainer = e.target.parentElement;
+    
+    // Remove from DOM
+    imageContainer.remove();
+    
+    // Remove from images array
+    const index = images.findIndex(img => img.id === imageId);
+    if (index !== -1) {
+        images.splice(index, 1);
+    }
+    
+    saveToLocalStorage();
+}
+
 // Image dragging
 function startElementDrag(e) {
     e.stopPropagation();
-    selectedElement = e.target;
+    selectedElement = e.target.parentElement; // Get the container instead of the image
     isDragging = true;
     
-    // Store the initial position of the element
+    // Store the initial position of the container
     const initialX = parseFloat(selectedElement.style.left);
     const initialY = parseFloat(selectedElement.style.top);
     
@@ -312,15 +352,28 @@ function loadFromLocalStorage() {
             const imgElement = document.createElement('img');
             imgElement.src = imageData.src;
             imgElement.className = 'image-element';
-            imgElement.style.left = `${imageData.x}px`;
-            imgElement.style.top = `${imageData.y}px`;
-            imgElement.dataset.id = imageData.id;
+            
+            // Add delete button
+            const deleteBtn = document.createElement('button');
+            deleteBtn.className = 'delete-btn';
+            deleteBtn.innerHTML = '×';
+            deleteBtn.dataset.imageId = imageData.id;
+            deleteBtn.addEventListener('click', deleteImage);
+            
+            // Create container for image and delete button
+            const imageContainer = document.createElement('div');
+            imageContainer.className = 'image-container';
+            imageContainer.style.position = 'absolute';
+            imageContainer.style.left = `${imageData.x}px`;
+            imageContainer.style.top = `${imageData.y}px`;
             
             // Add drag functionality
             imgElement.addEventListener('mousedown', startElementDrag);
             imgElement.addEventListener('touchstart', handleElementTouchStart);
             
-            canvas.appendChild(imgElement);
+            imageContainer.appendChild(imgElement);
+            imageContainer.appendChild(deleteBtn);
+            canvas.appendChild(imageContainer);
         });
         
         updateCanvasTransform();
