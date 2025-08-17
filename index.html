@@ -1,34 +1,402 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>All local storyboarding tool</title>
-    
-    <!-- Discord Embed Meta Tags - No images -->
-    <meta name="description" content="All local storyboarding tool">
-    <meta property="og:title" content="All local storyboarding tool">
-    <meta property="og:description" content="All local storyboarding tool">
-    <meta property="twitter:title" content="All local storyboarding tool">
-    <meta property="twitter:description" content="All local storyboarding tool">
-    <meta name="theme-color" content="#2563eb">
-    
-    <link rel="stylesheet" href="styles.css">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Pasteboard — paste, move, scale, delete images (IndexedDB)</title>
+  <style>
+    :root{
+      --bg:#0f1115; --panel:#151923; --text:#e6e8ee; --muted:#a6accd; --accent:#6ea8fe; --accent-2:#9bdbff;
+      --outline:#6ea8feAA; --outline-strong:#6ea8fe;
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{
+      margin:0; font:14px/1.4 ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji";
+      background:var(--bg); color:var(--text);
+      display:flex; flex-direction:column; min-height:100vh;
+    }
+    header{
+      display:flex; align-items:center; gap:.5rem; padding:.6rem .8rem; background:linear-gradient(180deg, #171b26 0%, #11141c 100%);
+      border-bottom:1px solid #22283a; position:sticky; top:0; z-index:1000;
+    }
+    header .title{font-weight:700; letter-spacing:.2px}
+    header .hint{color:var(--muted)}
+    header .sp{flex:1}
+    button, .btn{
+      background:#1b2232; border:1px solid #2a3550; padding:.45rem .7rem; border-radius:.55rem; color:var(--text);
+      cursor:pointer; transition:.15s ease all; user-select:none;
+    }
+    button:hover{border-color:#3b4f7d; transform:translateY(-1px)}
+    button:active{transform:none}
+    .toolbar{display:flex; gap:.4rem; align-items:center}
+    .pill{padding:.25rem .5rem; border-radius:999px; background:#121725; border:1px solid #1f2740; color:var(--muted)}
+
+    #board{
+      position:relative; flex:1; overflow:auto; background:repeating-conic-gradient(from 45deg, #0f1115 0% 25%, #0e1014 0% 50%) 50%/40px 40px;
+      outline:none;
+    }
+    /* Infinite work area */
+    #canvasArea{
+      position:relative; width:4096px; height:3072px; margin:48px auto; background:radial-gradient(1200px 800px at 50% 35%, #141924 0 40%, transparent 60%),
+      linear-gradient(180deg, rgba(255,255,255,.02), rgba(0,0,0,.05)); border:1px dashed #2a3150; border-radius:16px;
+    }
+
+    .item{
+      position:absolute; border:1px solid transparent; border-radius:8px; box-shadow:none; touch-action:none;
+      --shadow: 0 10px 20px rgba(0,0,0,.35), 0 2px 6px rgba(0,0,0,.35);
+    }
+    .item img{ display:block; width:100%; height:100%; object-fit:contain; border-radius:8px; box-shadow:var(--shadow) }
+    .item.selected{ border-color:var(--outline-strong); box-shadow:0 0 0 2px var(--outline) inset }
+
+    .handle{ position:absolute; width:14px; height:14px; border:2px solid #0b1020; border-radius:50%; background:var(--accent); box-shadow:0 0 0 2px #0b1020; }
+    .handle.br{ right:-8px; bottom:-8px; cursor:nwse-resize }
+
+    .toast{ position:fixed; left:50%; transform:translateX(-50%); bottom:18px; padding:.5rem .75rem; background:#0e1527; border:1px solid #2a3550; border-radius:.6rem; color:var(--muted); z-index:9999 }
+    .ghost{ pointer-events:none; opacity:.25; outline:2px dashed var(--accent); border-radius:8px; position:absolute }
+
+    footer{display:flex; gap:.6rem; align-items:center; justify-content:center; padding:.5rem; border-top:1px solid #22283a; color:var(--muted)}
+  </style>
 </head>
 <body>
-    <div id="toolbar">
-        <button id="zoomIn">Zoom In</button>
-        <button id="zoomOut">Zoom Out</button>
-        <button id="resetView">Reset View</button>
-        <span id="zoomLevel">100%</span>
+  <header>
+    <div class="title">📋 Pasteboard</div>
+    <div class="hint">Paste (Ctrl/⌘+V), drag to move, drag the corner to scale, click + Delete to remove.</div>
+    <div class="sp"></div>
+    <div class="toolbar">
+      <button id="persistBtn" title="Request persistent storage so data is less likely to be cleared">Request Persistence</button>
+      <button id="clearBtn" title="Delete all items and stored images">Clear All</button>
+      <span id="usage" class="pill" title="Approximate storage usage/quota">—</span>
     </div>
-    <div id="canvas-container">
-        <div id="grid-background"></div>
-        <div id="canvas"></div>
-    </div>
-    <div id="instructions">
-        <p>Ctrl+V to paste images | Drag to move | Use zoom buttons to scale</p>
-    </div>
-    <script src="script.js"></script>
+  </header>
+
+  <main id="board" tabindex="0" aria-label="Pasteboard work area">
+    <div id="canvasArea" role="region" aria-label="Canvas"></div>
+  </main>
+
+  <div id="toast" class="toast" hidden>Ready: press Ctrl/⌘+V to paste images, or drop files.</div>
+
+  <footer>
+    <div>Stored locally with IndexedDB. Works offline. No file size limits beyond browser quota.</div>
+  </footer>
+
+  <script>
+  (function(){
+    'use strict';
+
+    // ------------------------ IndexedDB helpers ------------------------
+    const DB_NAME = 'pasteboard-db-v1';
+    const IMG_STORE = 'images';
+    const ITEM_STORE = 'items';
+
+    /** @type {IDBDatabase} */
+    let db;
+
+    const idb = {
+      open(){
+        return new Promise((resolve, reject)=>{
+          const req = indexedDB.open(DB_NAME, 1);
+          req.onupgradeneeded = (ev)=>{
+            const db = req.result;
+            if(!db.objectStoreNames.contains(IMG_STORE)){
+              db.createObjectStore(IMG_STORE, { keyPath:'id', autoIncrement:true });
+            }
+            if(!db.objectStoreNames.contains(ITEM_STORE)){
+              const store = db.createObjectStore(ITEM_STORE, { keyPath:'id', autoIncrement:true });
+              store.createIndex('imageId', 'imageId', { unique:false });
+            }
+          };
+          req.onsuccess = ()=>{ db = req.result; resolve(db); };
+          req.onerror = ()=> reject(req.error);
+        });
+      },
+      tx(stores, mode='readonly'){ return db.transaction(stores, mode); },
+      async addImage(blob){
+        const t = this.tx([IMG_STORE], 'readwrite');
+        const rec = { blob, type: blob.type || 'image/png', created: Date.now() };
+        const id = await promisify(t.objectStore(IMG_STORE).add(rec));
+        return id;
+      },
+      async addItem(item){
+        const t = this.tx([ITEM_STORE], 'readwrite');
+        const id = await promisify(t.objectStore(ITEM_STORE).add({ ...item, created: Date.now() }));
+        return id;
+      },
+      async updateItem(item){
+        const t = this.tx([ITEM_STORE], 'readwrite');
+        await promisify(t.objectStore(ITEM_STORE).put(item));
+      },
+      async getAllItems(){
+        const t = this.tx([ITEM_STORE]);
+        return await promisify(t.objectStore(ITEM_STORE).getAll());
+      },
+      async getImage(id){
+        const t = this.tx([IMG_STORE]);
+        const rec = await promisify(t.objectStore(IMG_STORE).get(id));
+        return rec?.blob || null;
+      },
+      async deleteItem(id){
+        const t = this.tx([ITEM_STORE], 'readwrite');
+        await promisify(t.objectStore(ITEM_STORE).delete(id));
+      },
+      async deleteImage(id){
+        const t = this.tx([IMG_STORE], 'readwrite');
+        await promisify(t.objectStore(IMG_STORE).delete(id));
+      },
+      async hasOtherItemsUsingImage(imageId){
+        const t = this.tx([ITEM_STORE]);
+        const idx = t.objectStore(ITEM_STORE).index('imageId');
+        return new Promise((resolve, reject)=>{
+          let count = 0;
+          const req = idx.openCursor(IDBKeyRange.only(imageId));
+          req.onsuccess = ()=>{
+            const cur = req.result;
+            if(cur){ count++; cur.continue(); }
+            else resolve(count > 0);
+          };
+          req.onerror = ()=> reject(req.error);
+        });
+      }
+    };
+
+    function promisify(req){
+      return new Promise((resolve, reject)=>{
+        req.onsuccess = ()=> resolve(req.result);
+        req.onerror = ()=> reject(req.error);
+      });
+    }
+
+    // ------------------------ UI + interactions ------------------------
+    const board = document.getElementById('board');
+    const canvasArea = document.getElementById('canvasArea');
+    const toast = document.getElementById('toast');
+    const clearBtn = document.getElementById('clearBtn');
+    const persistBtn = document.getElementById('persistBtn');
+    const usageBadge = document.getElementById('usage');
+
+    const urlCache = new Map(); // imageId -> objectURL
+
+    /** @type {HTMLElement|null} */
+    let selected = null;
+    let dragState = null; // {type:'move'|'resize', startX, startY, origLeft, origTop, origW, origH}
+
+    function showToast(msg, ms=2000){ toast.textContent = msg; toast.hidden = false; clearTimeout(showToast._t); showToast._t = setTimeout(()=> toast.hidden = true, ms); }
+
+    function formatBytes(bytes){ if(!bytes && bytes!==0) return '—'; const k=1024; const sizes=['B','KB','MB','GB','TB']; const i=Math.floor(Math.log(bytes)/Math.log(k)); return (bytes/Math.pow(k,i)).toFixed( (i<2)?0:1 )+" "+sizes[i]; }
+
+    async function refreshQuota(){
+      if(navigator.storage && navigator.storage.estimate){
+        const {usage=0, quota=0} = await navigator.storage.estimate();
+        usageBadge.textContent = `${formatBytes(usage)} / ${formatBytes(quota)}`;
+      }
+    }
+
+    async function requestPersistence(){
+      if(navigator.storage?.persist){
+        const granted = await navigator.storage.persist();
+        showToast(granted ? 'Persistence granted: data less likely to be cleared.' : 'Persistence not granted. The app still works.');
+      }else{
+        showToast('Persistence API not supported in this browser.');
+      }
+      await refreshQuota();
+    }
+
+    persistBtn.addEventListener('click', requestPersistence);
+
+    // Create DOM for an item
+    function createItemEl(itemId, imageId, url, x, y, w, h){
+      const el = document.createElement('div');
+      el.className = 'item';
+      el.tabIndex = 0;
+      el.dataset.id = String(itemId);
+      el.dataset.imageId = String(imageId);
+      el.style.left = (x|0) + 'px';
+      el.style.top = (y|0) + 'px';
+      el.style.width = Math.max(16, w|0) + 'px';
+      el.style.height = Math.max(16, h|0) + 'px';
+
+      const img = document.createElement('img');
+      img.decoding = 'async';
+      img.src = url;
+      el.appendChild(img);
+
+      const handle = document.createElement('div');
+      handle.className = 'handle br';
+      el.appendChild(handle);
+
+      // Selection
+      el.addEventListener('pointerdown', (e)=>{
+        if(e.target === handle){ startResize(el, e); }
+        else { startDrag(el, e); }
+      });
+
+      // Keyboard focus selection
+      el.addEventListener('focus', ()=> select(el));
+      el.addEventListener('blur', ()=> { if(selected===el) deselect(); });
+
+      canvasArea.appendChild(el);
+      return el;
+    }
+
+    function select(el){ if(selected===el) return; if(selected) selected.classList.remove('selected'); selected = el; if(el) el.classList.add('selected'); }
+    function deselect(){ if(selected){ selected.classList.remove('selected'); selected = null; } }
+
+    function startDrag(el, e){
+      e.preventDefault(); el.setPointerCapture(e.pointerId); select(el);
+      const rect = el.getBoundingClientRect();
+      const parentRect = canvasArea.getBoundingClientRect();
+      dragState = { type:'move', startX: e.clientX, startY: e.clientY,
+        origLeft: parseFloat(el.style.left||'0'), origTop: parseFloat(el.style.top||'0'),
+        parentLeft: parentRect.left, parentTop: parentRect.top };
+
+      const move = (ev)=>{
+        if(!dragState) return;
+        const dx = ev.clientX - dragState.startX; const dy = ev.clientY - dragState.startY;
+        el.style.left = Math.round(dragState.origLeft + dx) + 'px';
+        el.style.top  = Math.round(dragState.origTop  + dy) + 'px';
+      };
+      const up = async (ev)=>{
+        el.releasePointerCapture(e.pointerId);
+        board.removeEventListener('pointermove', move); board.removeEventListener('pointerup', up);
+        if(!dragState) return; const item = await getItemModelFromEl(el); await idb.updateItem(item); dragState=null;
+      };
+      board.addEventListener('pointermove', move); board.addEventListener('pointerup', up);
+    }
+
+    function startResize(el, e){
+      e.preventDefault(); e.stopPropagation(); el.setPointerCapture(e.pointerId); select(el);
+      dragState = { type:'resize', startX:e.clientX, startY:e.clientY,
+        origW: parseFloat(el.style.width||'100'), origH: parseFloat(el.style.height||'100') };
+
+      const move = (ev)=>{
+        if(!dragState) return; const dx = ev.clientX - dragState.startX; const dy = ev.clientY - dragState.startY;
+        const delta = Math.max(dx, dy); // uniform scale (preserve aspect)
+        const nw = Math.max(16, dragState.origW + delta); const nh = Math.max(16, dragState.origH + delta);
+        el.style.width = Math.round(nw) + 'px'; el.style.height = Math.round(nh) + 'px';
+      };
+      const up = async (ev)=>{
+        el.releasePointerCapture(e.pointerId);
+        board.removeEventListener('pointermove', move); board.removeEventListener('pointerup', up);
+        if(!dragState) return; const item = await getItemModelFromEl(el); await idb.updateItem(item); dragState=null;
+      };
+      board.addEventListener('pointermove', move); board.addEventListener('pointerup', up);
+    }
+
+    async function getItemModelFromEl(el){
+      return {
+        id: Number(el.dataset.id),
+        imageId: Number(el.dataset.imageId),
+        x: parseFloat(el.style.left)||0,
+        y: parseFloat(el.style.top)||0,
+        width: parseFloat(el.style.width)||100,
+        height: parseFloat(el.style.height)||100,
+        z: parseInt(getComputedStyle(el).zIndex||'0',10) || 0,
+      };
+    }
+
+    // Delete key handling
+    window.addEventListener('keydown', async (e)=>{
+      const isTyping = ['INPUT','TEXTAREA'].includes(document.activeElement?.tagName) || document.activeElement?.isContentEditable;
+      if(isTyping) return;
+      if((e.key === 'Delete' || e.key === 'Backspace') && selected){
+        e.preventDefault();
+        const itemId = Number(selected.dataset.id);
+        const imageId = Number(selected.dataset.imageId);
+        selected.remove(); deselect();
+        await idb.deleteItem(itemId);
+        // GC: if no other items reference image, delete image
+        const stillUsed = await idb.hasOtherItemsUsingImage(imageId);
+        if(!stillUsed){ await idb.deleteImage(imageId); const url = urlCache.get(imageId); if(url){ URL.revokeObjectURL(url); urlCache.delete(imageId);} }
+        showToast('Item deleted.');
+        await refreshQuota();
+      }
+    });
+
+    // Deselect when clicking empty board
+    canvasArea.addEventListener('pointerdown', (e)=>{ if(e.target===canvasArea) deselect(); });
+
+    // Paste handler (clipboard)
+    window.addEventListener('paste', async (e)=>{
+      const items = e.clipboardData?.items || [];
+      const images = [];
+      for(const it of items){
+        if(it.kind === 'file' && it.type.startsWith('image/')){
+          const file = it.getAsFile(); if(file) images.push(file);
+        }
+      }
+      if(images.length){ e.preventDefault(); for(const img of images){ await addImageBlob(img); } }
+    });
+
+    // Drag+Drop files
+    ;['dragenter','dragover','dragleave','drop'].forEach(ev=> board.addEventListener(ev, e=>{ e.preventDefault(); e.stopPropagation(); }));
+    board.addEventListener('drop', async (e)=>{
+      const files = [...(e.dataTransfer?.files || [])].filter(f=> f.type.startsWith('image/'));
+      for(const f of files){ await addImageBlob(f); }
+    });
+
+    async function addImageBlob(blob){
+      const imageId = await idb.addImage(blob);
+      const url = URL.createObjectURL(blob); urlCache.set(imageId, url);
+      const dims = await getImageDimensions(url);
+      const defaultW = Math.min(512, dims.width || 512);
+      const defaultH = Math.round(defaultW * (dims.height/dims.width || 1));
+      const item = { imageId, x: 80 + Math.round(Math.random()*40), y: 80 + Math.round(Math.random()*40), width: defaultW, height: defaultH, z: 0 };
+      const itemId = await idb.addItem(item);
+      createItemEl(itemId, imageId, url, item.x, item.y, item.width, item.height);
+      showToast('Image added. Drag to move. Drag the corner to scale.');
+      await refreshQuota();
+    }
+
+    function getImageDimensions(url){
+      return new Promise((resolve)=>{
+        const img = new Image();
+        img.onload = ()=> resolve({ width: img.naturalWidth||0, height: img.naturalHeight||0 });
+        img.onerror = ()=> resolve({ width: 0, height: 0 });
+        img.src = url;
+      });
+    }
+
+    // Clear all
+    clearBtn.addEventListener('click', async ()=>{
+      if(!confirm('Delete all items and stored images? This cannot be undone.')) return;
+      const tx = db.transaction([ITEM_STORE, IMG_STORE], 'readwrite');
+      await Promise.all([
+        promisify(tx.objectStore(ITEM_STORE).clear()),
+        promisify(tx.objectStore(IMG_STORE).clear()),
+      ]);
+      // Cleanup DOM + object URLs
+      canvasArea.querySelectorAll('.item').forEach(n=> n.remove());
+      for(const [id, url] of urlCache){ URL.revokeObjectURL(url); }
+      urlCache.clear();
+      deselect();
+      await refreshQuota();
+      showToast('All cleared.');
+    });
+
+    // Load from DB
+    async function loadAll(){
+      await idb.open();
+      await refreshQuota();
+      // Hint toast once
+      showToast('Paste images (Ctrl/⌘+V) or drop files. Click an image then press Delete to remove.');
+
+      const items = await idb.getAllItems();
+      // Get all unique imageIds
+      const needed = [...new Set(items.map(it=> it.imageId))];
+      const blobs = await Promise.all(needed.map(id=> idb.getImage(id)));
+      needed.forEach((imageId, i)=>{ if(blobs[i]){ const url = URL.createObjectURL(blobs[i]); urlCache.set(imageId, url); } });
+
+      // Render items
+      for(const it of items){
+        const url = urlCache.get(it.imageId);
+        if(url){ createItemEl(it.id, it.imageId, url, it.x, it.y, it.width, it.height); }
+      }
+    }
+
+    // Kick off
+    loadAll();
+
+  })();
+  </script>
 </body>
 </html>
